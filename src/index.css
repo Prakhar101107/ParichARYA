@@ -1,0 +1,55 @@
+@import "tailwindcss";
+
+@theme {
+  --color-primary: #2A7C13;
+  --color-primary-dark: #1E5C0D;
+  --color-primary-light: #369A19;
+  --color-accent: #76C457;
+  --color-accent-light: #90D375;
+  --color-cream: #FFF8CF;
+  --color-cream-light: #FFFAE5;
+  --color-sand: #FBE6C2;
+  --color-sand-dark: #E7C492;
+}
+
+@layer base {
+  html {
+    font-size: 16px;
+    transition: font-size 0.15s ease-out;
+  }
+
+  html[data-text-size="normal"] {
+    font-size: 16px;
+  }
+
+  html[data-text-size="large"] {
+    font-size: 18.5px;
+  }
+
+  html[data-text-size="xlarge"] {
+    font-size: 21px;
+  }
+
+  body {
+    font-family: 'Plus Jakarta Sans', 'Noto Sans Devanagari', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  }
+}
+
+/* Ensure fixed pixel utility badges scale fluidly with text display size */
+html[data-text-size="large"] .text-\[10px\] {
+  font-size: 0.72rem !important;
+}
+html[data-text-size="large"] .text-\[11px\] {
+  font-size: 0.78rem !important;
+}
+
+html[data-text-size="xlarge"] .text-\[10px\] {
+  font-size: 0.8rem !important;
+}
+html[data-text-size="xlarge"] .text-\[11px\] {
+  font-size: 0.88rem !important;
+}
+
+.font-devanagari {
+  font-family: 'Noto Sans Devanagari', 'Plus Jakarta Sans', system-ui, sans-serif;
+}

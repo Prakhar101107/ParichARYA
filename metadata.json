@@ -1,0 +1,7 @@
+{
+  "name": "ParichARYA",
+  "description": "Prescription-to-speech assistant translating doctor shorthand into plain spoken Hindi and visual schedule cards for patients.",
+  "requestFramePermissions": ["camera", "microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
+

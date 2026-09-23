@@ -146,7 +146,42 @@ export default function App() {
       }
 
       const data = await res.json();
-      const meds: Medicine[] = data.medicines || [];
+      let meds: Medicine[] = Array.isArray(data.medicines) ? data.medicines : [];
+
+      if (meds.length === 0 && Array.isArray(data.medications)) {
+        meds = data.medications.map((item: any, idx: number) => {
+          const rawFood = (item.food_timing || item.food_relation || 'not_specified').toLowerCase();
+          const foodNorm = ['before_food', 'after_food', 'with_food', 'empty_stomach', 'bedtime'].includes(rawFood)
+            ? rawFood
+            : 'not_specified';
+
+          const conf = typeof item.confidence === 'number'
+            ? Math.max(0, Math.min(1, item.confidence))
+            : 0.85;
+
+          const durationNum = item.duration
+            ? parseInt(String(item.duration).replace(/\D+/g, ''), 10) || null
+            : null;
+
+          return {
+            id: `med_${Date.now()}_${idx}`,
+            drug_name: item.drug_name || 'Unidentified Medicine',
+            form: 'tablet',
+            strength: item.strength && item.strength !== 'Not specified' ? item.strength : '',
+            frequency_raw: item.frequency || 'OD',
+            frequency_plain: item.frequency || 'Once daily',
+            food_relation: foodNorm,
+            duration_days: durationNum,
+            special_instructions: item.instructions_hindi || null,
+            confidence: {
+              name: conf,
+              dose: conf,
+              frequency: conf,
+            },
+            verified: false,
+          };
+        });
+      }
 
       if (meds.length === 0) {
         throw new Error(

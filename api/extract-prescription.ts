@@ -102,90 +102,54 @@ CRITICAL POLICY & OPERATIONAL RULES:
               type: Type.OBJECT,
               description: 'Prescription document extraction result',
               properties: {
-                patient_name: {
-                  type: Type.STRING,
-                  description: 'Patient name as written on the slip, or null if absent/illegible',
-                  nullable: true,
-                },
-                is_legible: {
-                  type: Type.BOOLEAN,
-                  description: 'True if prescription image is clear enough to identify at least one medication',
-                },
-                extraction_notes: {
-                  type: Type.STRING,
-                  description: 'Transcriptionist remarks regarding handwriting clarity, stamp details, or smudges',
-                },
                 medications: {
                   type: Type.ARRAY,
-                  description: 'List of all medications transcribed from the document',
+                  description: 'List of all medications transcribed from the doctor prescription',
                   items: {
                     type: Type.OBJECT,
                     properties: {
                       drug_name: {
                         type: Type.STRING,
-                        description: 'Brand or generic molecule name as written (e.g., Pan-D, Calpol, Azithro, Telma)',
-                      },
-                      form: {
-                        type: Type.STRING,
-                        description: 'tablet, capsule, syrup, injection, drops, ointment, or other',
+                        description: 'Brand or generic medicine name (e.g., Azithro, Pan-D, Calpol, Telma)',
                       },
                       strength: {
                         type: Type.STRING,
-                        description: 'Strength with units (e.g., 500mg, 40mg, 10ml) or "Not specified"',
+                        description: 'Strength with units (e.g., 500mg, 40mg, 10ml) or standard',
                       },
-                      frequency_raw: {
+                      frequency: {
                         type: Type.STRING,
-                        description: 'Shorthand abbreviation as written on prescription (e.g., OD, BD, TDS, 1-0-1, BBF)',
+                        description: 'Frequency instruction (e.g., Once daily, Twice daily, TDS, SOS)',
                       },
-                      frequency_plain: {
+                      food_timing: {
                         type: Type.STRING,
-                        description: 'Expanded plain English instruction (e.g., Once daily, Twice daily, Three times daily, SOS)',
+                        description: 'One of: before_food, after_food, empty_stomach, with_food, bedtime',
                       },
-                      food_relation: {
+                      duration: {
                         type: Type.STRING,
-                        description: 'One of: before_food, after_food, with_food, empty_stomach, bedtime, not_specified',
-                      },
-                      duration_days: {
-                        type: Type.INTEGER,
-                        description: 'Duration in days (e.g., 3, 5, 7, 14, 30), or 0 if not specified',
+                        description: 'Duration (e.g., 3 days, 5 days, 1 month) or Not specified',
                       },
                       instructions_hindi: {
                         type: Type.STRING,
                         description: 'Plain Hindi spoken instruction in Devanagari script for the patient',
                       },
-                      special_instructions: {
-                        type: Type.STRING,
-                        description: 'Additional instructions like SOS for fever, dissolve in water, etc.',
-                      },
-                      confidence_name: {
+                      confidence: {
                         type: Type.NUMBER,
-                        description: 'Confidence in reading the medicine name (0.0 to 1.0)',
-                      },
-                      confidence_dose: {
-                        type: Type.NUMBER,
-                        description: 'Confidence in reading the dosage/form (0.0 to 1.0)',
-                      },
-                      confidence_frequency: {
-                        type: Type.NUMBER,
-                        description: 'Confidence in reading frequency and food timing (0.0 to 1.0)',
+                        description: 'Confidence score between 0.0 and 1.0',
                       },
                     },
                     required: [
                       'drug_name',
-                      'form',
                       'strength',
-                      'frequency_raw',
-                      'frequency_plain',
-                      'food_relation',
+                      'frequency',
+                      'food_timing',
+                      'duration',
                       'instructions_hindi',
-                      'confidence_name',
-                      'confidence_dose',
-                      'confidence_frequency',
+                      'confidence',
                     ],
                   },
                 },
               },
-              required: ['is_legible', 'medications', 'extraction_notes'],
+              required: ['medications'],
             },
           },
         });
@@ -213,7 +177,7 @@ CRITICAL POLICY & OPERATIONAL RULES:
       throw lastError || new Error('All vision candidate models failed to decipher prescription.');
     }
 
-    // Sanitize markdown fences
+    // Strip markdown code fences (```json ... ```) before parsing JSON
     const sanitized = responseText
       .replace(/^```(?:json)?\s*/i, '')
       .replace(/\s*```$/i, '')
@@ -234,61 +198,47 @@ CRITICAL POLICY & OPERATIONAL RULES:
       : [];
 
     const medicines = rawMeds.map((item: any, idx: number) => {
-      const formNorm = ['tablet', 'capsule', 'syrup', 'injection', 'drops', 'ointment'].includes(
-        item.form?.toLowerCase(),
-      )
-        ? item.form.toLowerCase()
-        : 'tablet';
-
+      const rawFood = (item.food_timing || item.food_relation || 'not_specified').toLowerCase();
       const foodNorm = [
         'before_food',
         'after_food',
         'with_food',
         'empty_stomach',
         'bedtime',
-        'not_specified',
-      ].includes(item.food_relation)
-        ? item.food_relation
+      ].includes(rawFood)
+        ? rawFood
         : 'not_specified';
 
-      const confName = typeof item.confidence_name === 'number'
-        ? Math.max(0, Math.min(1, item.confidence_name))
-        : typeof item.confidence === 'number'
+      const conf = typeof item.confidence === 'number'
         ? Math.max(0, Math.min(1, item.confidence))
         : 0.85;
 
-      const confDose = typeof item.confidence_dose === 'number'
-        ? Math.max(0, Math.min(1, item.confidence_dose))
-        : confName;
-
-      const confFreq = typeof item.confidence_frequency === 'number'
-        ? Math.max(0, Math.min(1, item.confidence_frequency))
-        : confName;
+      const durationNum = item.duration
+        ? parseInt(String(item.duration).replace(/\D+/g, ''), 10) || null
+        : null;
 
       return {
         id: `med_${Date.now()}_${idx}`,
         drug_name: item.drug_name || 'Unidentified Medicine',
-        form: formNorm,
+        form: 'tablet',
         strength: item.strength && item.strength !== 'Not specified' ? item.strength : '',
-        frequency_raw: item.frequency_raw || 'OD',
-        frequency_plain: item.frequency_plain || 'Once a day',
+        frequency_raw: item.frequency || 'OD',
+        frequency_plain: item.frequency || 'Once daily',
         food_relation: foodNorm,
-        duration_days: item.duration_days && item.duration_days > 0 ? item.duration_days : null,
-        special_instructions: item.instructions_hindi || item.special_instructions || null,
+        duration_days: durationNum,
+        special_instructions: item.instructions_hindi || null,
         confidence: {
-          name: confName,
-          dose: confDose,
-          frequency: confFreq,
+          name: conf,
+          dose: conf,
+          frequency: conf,
         },
         verified: false,
       };
     });
 
     return res.status(200).json({
+      medications: rawMeds,
       medicines,
-      patient_name: parsedResult.patient_name || null,
-      is_legible: parsedResult.is_legible !== false,
-      extraction_notes: parsedResult.extraction_notes || '',
     });
   } catch (error: any) {
     console.error('Prescription extraction error:', error);

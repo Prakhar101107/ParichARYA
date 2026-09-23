@@ -19,6 +19,7 @@ import {
   Smartphone,
 } from 'lucide-react';
 import { analyzeImageQuality, QualityCheckResult } from '../utils/imageQuality';
+import { resizeImageForUpload } from '../utils/imageResize';
 import { SAMPLE_PRESCRIPTIONS, SamplePrescription } from '../data/samplePrescriptions';
 import { AppLanguage } from '../types';
 import { getTranslations } from '../utils/translations';
@@ -226,8 +227,19 @@ export default function CaptureStep({
     if (!videoRef.current) return;
     const video = videoRef.current;
 
-    const width = video.videoWidth || video.clientWidth || 800;
-    const height = video.videoHeight || video.clientHeight || 600;
+    let width = video.videoWidth || video.clientWidth || 800;
+    let height = video.videoHeight || video.clientHeight || 600;
+
+    const maxDim = 1600;
+    if (width > maxDim || height > maxDim) {
+      if (width > height) {
+        height = Math.round((height * maxDim) / width);
+        width = maxDim;
+      } else {
+        width = Math.round((width * maxDim) / height);
+        height = maxDim;
+      }
+    }
 
     const canvas = document.createElement('canvas');
     canvas.width = width;
@@ -236,23 +248,30 @@ export default function CaptureStep({
     if (!ctx) return;
 
     ctx.drawImage(video, 0, 0, width, height);
-    const dataUrl = canvas.toDataURL('image/jpeg', 0.88);
+    const dataUrl = canvas.toDataURL('image/jpeg', 0.7);
 
     stopCamera();
     processCapturedImage(dataUrl);
   };
 
   // Handle file selection from gallery or file system
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    const reader = new FileReader();
-    reader.onload = () => {
-      const dataUrl = reader.result as string;
-      processCapturedImage(dataUrl);
-    };
-    reader.readAsDataURL(file);
+    try {
+      // Downscale using HTML5 canvas to max 1600px with 0.7 JPEG quality
+      const resizedDataUrl = await resizeImageForUpload(file, 1600, 1600, 0.7);
+      processCapturedImage(resizedDataUrl);
+    } catch (err) {
+      console.warn('Image downscaling failed, falling back to FileReader:', err);
+      const reader = new FileReader();
+      reader.onload = () => {
+        const dataUrl = reader.result as string;
+        processCapturedImage(dataUrl);
+      };
+      reader.readAsDataURL(file);
+    }
 
     // Reset input so re-selecting the same file works
     e.target.value = '';
@@ -269,18 +288,25 @@ export default function CaptureStep({
     setIsDragging(false);
   };
 
-  const handleDrop = (e: React.DragEvent) => {
+  const handleDrop = async (e: React.DragEvent) => {
     e.preventDefault();
     setIsDragging(false);
     const file = e.dataTransfer.files?.[0];
     if (!file || !file.type.startsWith('image/')) return;
 
-    const reader = new FileReader();
-    reader.onload = () => {
-      const dataUrl = reader.result as string;
-      processCapturedImage(dataUrl);
-    };
-    reader.readAsDataURL(file);
+    try {
+      // Downscale using HTML5 canvas to max 1600px with 0.7 JPEG quality
+      const resizedDataUrl = await resizeImageForUpload(file, 1600, 1600, 0.7);
+      processCapturedImage(resizedDataUrl);
+    } catch (err) {
+      console.warn('Image downscaling failed on drop, falling back:', err);
+      const reader = new FileReader();
+      reader.onload = () => {
+        const dataUrl = reader.result as string;
+        processCapturedImage(dataUrl);
+      };
+      reader.readAsDataURL(file);
+    }
   };
 
   // Open the page in a new window/tab to bypass iframe permission blocks
@@ -290,17 +316,22 @@ export default function CaptureStep({
 
   // Process captured image and run client-side quality check
   const processCapturedImage = async (dataUrl: string, promptHint?: string) => {
-    setSelectedImage(dataUrl);
+    // Ensure final image is bounded within 1600px / 0.7 quality
+    const boundedDataUrl = dataUrl.length > 400000 
+      ? await resizeImageForUpload(dataUrl, 1600, 1600, 0.7) 
+      : dataUrl;
+
+    setSelectedImage(boundedDataUrl);
     setQualityWarningIgnored(false);
     setCameraError(null);
 
     // Run client-side quality check
-    const result = await analyzeImageQuality(dataUrl);
+    const result = await analyzeImageQuality(boundedDataUrl);
     setQualityCheck(result);
 
     // If quality is good, proceed straight to clinical extraction
     if (result.passed) {
-      await onImageCaptured(dataUrl, promptHint);
+      await onImageCaptured(boundedDataUrl, promptHint);
     }
   };
 

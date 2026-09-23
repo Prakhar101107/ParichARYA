@@ -6,7 +6,7 @@
 import express from 'express';
 import path from 'path';
 import dotenv from 'dotenv';
-import { GoogleGenAI, Type } from '@google/genai';
+import { GoogleGenAI, Type, HarmCategory, HarmBlockThreshold } from '@google/genai';
 import { createServer as createViteServer } from 'vite';
 
 dotenv.config();
@@ -27,22 +27,41 @@ const ai = new GoogleGenAI({
 });
 
 const GEMINI_CANDIDATE_MODELS = [
+  'gemini-2.5-flash',
+  'gemini-flash-latest',
   'gemini-flash-lite-latest',
   'gemini-3.1-flash-lite',
-  'gemini-flash-latest',
   'gemini-3.8-flash',
-  'gemini-3.5-flash',
 ];
 
 async function callGeminiWithCascade(params: { contents: any; config?: any }) {
   let lastError: any = null;
+  const configWithSafety = {
+    temperature: 0.1,
+    ...params.config,
+    safetySettings: [
+      { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_NONE },
+      { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_NONE },
+      { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_NONE },
+      { category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold: HarmBlockThreshold.BLOCK_NONE },
+    ],
+  };
+
   for (const model of GEMINI_CANDIDATE_MODELS) {
     try {
       const response = await ai.models.generateContent({
         model,
         contents: params.contents,
-        config: params.config,
+        config: configWithSafety,
       });
+
+      // Verify response candidate is not blocked by safety
+      const candidate = response.candidates?.[0];
+      if (candidate?.finishReason === 'SAFETY') {
+        console.warn(`Model ${model} candidate was blocked by SAFETY.`);
+        continue;
+      }
+
       if (response && response.text) {
         return response;
       }
@@ -70,28 +89,31 @@ app.post('/api/extract-prescription', async (req, res) => {
 
     const cleanBase64 = imageBase64.replace(/^data:image\/[a-zA-Z0-9+.-]+;base64,/, '');
 
-    const systemInstruction = `You are ParichARYA's clinical-shorthand interpreter, specialized in reading handwritten Indian doctor prescriptions written in shorthand.
-Your job is to decipher handwritten doctor notes and abbreviations accurately into structured medication plans.
+    const systemInstruction = `You are a specialized Clinical Document Transcriptionist and Latin Shorthand Normalizer.
+Your sole function is administrative document transcription: converting handwritten physical doctor prescriptions into structured text records for human verification.
 
-Common Indian medical shorthand conventions:
-- OD: Once a day (usually morning 1-0-0, or 0-0-1 if night)
-- BD / BID: Twice a day (morning & night 1-0-1)
-- TDS / TID: Three times a day (morning, afternoon, night 1-1-1)
-- QID: Four times a day
-- BBF / AC: Before breakfast / Before food / Empty stomach
-- PC / AF: Post cibum / After food
-- HS: At bedtime / night
-- SOS / PRN: As needed (e.g. for fever or severe pain)
-- Tab: Tablet, Cap: Capsule, Syp: Syrup, Inj: Injection, Oint: Ointment, Drops: Drops
-- x 3d, x 5d, x 7d, x 1m: duration in days or months
-
-HONEST CONFIDENCE REQUIREMENT:
-You must grade your reading confidence between 0.0 and 1.0 for each field group:
-- confidence_name: confidence in reading the brand or generic drug name accurately
-- confidence_dose: confidence in form and strength (e.g. 500mg, 40mg, 10ml)
-- confidence_frequency: confidence in timing, frequency, and before/after food instructions
-If doctor handwriting is smudged, hurried, or ambiguous, return a score below 0.70 so the human user will be prompted to verify it.
-Do NOT guess wildly. If an entry is barely legible, reflect that with a low confidence score (e.g. 0.40 - 0.65).`;
+CRITICAL POLICY & OPERATIONAL RULES:
+1. STRICT ADMINISTRATIVE SCOPE: You are an administrative OCR transcriber. You do NOT provide medical advice, diagnosis, or clinical evaluation. Do not judge or alter medications.
+2. LATIN SHORTHAND EXPANSION: Transcribe handwritten abbreviations into standardized terminology:
+   - OD: Once daily (सुबह या निश्चित समय 1-0-0)
+   - BD / BID: Twice daily (सुबह और रात 1-0-1)
+   - TDS / TID: Three times daily (सुबह, दोपहर, रात 1-1-1)
+   - QID: Four times daily
+   - BBF / AC: Before breakfast / Before food (खाली पेट)
+   - PC / AF: After food / Post meal (खाने के बाद)
+   - HS: At bedtime (रात को सोते समय)
+   - SOS / PRN: As needed (जरूरत पड़ने पर, जैसे बुखार या तेज दर्द के लिए)
+   - Tab / Cap / Syp / Inj / Oint / Drops: Tablet / Capsule / Syrup / Injection / Ointment / Drops
+   - x 3d, x 5d, x 7d, x 1m: duration in days or months
+3. HONEST CONFIDENCE SCORING:
+   - Provide a calibrated confidence score between 0.00 and 1.00 for each field:
+     * confidence_name: confidence in reading the brand or generic drug name accurately
+     * confidence_dose: confidence in form and strength (e.g. 500mg, 40mg, 10ml)
+     * confidence_frequency: confidence in timing, frequency, and before/after food instructions
+   - If handwriting is smudged, hurried, or ambiguous, assign confidence < 0.70 so the human user will be prompted to verify it.
+   - If a field is illegible or unwritten, set it to "Not specified" or null. NEVER invent or hallucinate drug names.
+4. HINDI INSTRUCTIONS (Devanagari):
+   - Provide a clear, respectful, 1-sentence patient direction in conversational Hindi Devanagari (e.g., "यह गोली दिन में दो बार खाने के बाद लें।").`;
 
     const contents = [
       {
@@ -101,7 +123,7 @@ Do NOT guess wildly. If an entry is barely legible, reflect that with a low conf
         },
       },
       {
-        text: `Analyze this prescription photograph. Extract every medicine listed with its form, strength, frequency, food relation, duration in days, and special instructions. Grade confidence honestly. ${promptHint ? `Note from user: ${promptHint}` : ''}`,
+        text: `Transcribe all prescribed medications from this medical document photograph into structured data. Grade visual confidence accurately.${promptHint ? ` Additional note from user: ${promptHint}` : ''}`,
       },
     ];
 
@@ -111,80 +133,120 @@ Do NOT guess wildly. If an entry is barely legible, reflect that with a low conf
         systemInstruction,
         responseMimeType: 'application/json',
         responseSchema: {
-          type: Type.ARRAY,
-          description: 'List of extracted medications',
-          items: {
-            type: Type.OBJECT,
-            properties: {
-              drug_name: {
-                type: Type.STRING,
-                description: 'Brand name or generic molecule as written (e.g. Azithro, Calpol, Pan-D, Telma)',
-              },
-              form: {
-                type: Type.STRING,
-                description: 'tablet, capsule, syrup, injection, drops, ointment, or other',
-              },
-              strength: {
-                type: Type.STRING,
-                description: 'Strength with units (e.g. 500mg, 650mg, 40mg, 10ml, 200mcg)',
-              },
-              frequency_raw: {
-                type: Type.STRING,
-                description: 'Shorthand abbreviation as written on prescription (e.g. OD, BD, TDS, 1-0-1, BBF)',
-              },
-              frequency_plain: {
-                type: Type.STRING,
-                description: 'Expanded plain English instruction (e.g. Once a day, Twice a day, Three times a day)',
-              },
-              food_relation: {
-                type: Type.STRING,
-                description: 'One of: before_food, after_food, with_food, empty_stomach, bedtime, not_specified',
-              },
-              duration_days: {
-                type: Type.INTEGER,
-                description: 'Duration in days (e.g. 3, 5, 7, 14, 30), or 0 if not specified',
-              },
-              special_instructions: {
-                type: Type.STRING,
-                description: 'Additional instructions like SOS for fever, dissolve in water, etc.',
-              },
-              confidence_name: {
-                type: Type.NUMBER,
-                description: 'Confidence in reading the medicine name (0.0 to 1.0)',
-              },
-              confidence_dose: {
-                type: Type.NUMBER,
-                description: 'Confidence in reading the dosage/form (0.0 to 1.0)',
-              },
-              confidence_frequency: {
-                type: Type.NUMBER,
-                description: 'Confidence in reading frequency and food timing (0.0 to 1.0)',
+          type: Type.OBJECT,
+          description: 'Prescription document extraction result',
+          properties: {
+            patient_name: {
+              type: Type.STRING,
+              description: 'Patient name as written on the slip, or null if absent/illegible',
+              nullable: true,
+            },
+            is_legible: {
+              type: Type.BOOLEAN,
+              description: 'True if prescription image is clear enough to identify at least one medication',
+            },
+            extraction_notes: {
+              type: Type.STRING,
+              description: 'Transcriptionist remarks regarding handwriting clarity, stamp details, or smudges',
+            },
+            medications: {
+              type: Type.ARRAY,
+              description: 'List of all medications transcribed from the document',
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  drug_name: {
+                    type: Type.STRING,
+                    description: 'Brand or generic molecule name as written (e.g., Pan-D, Calpol, Azithro, Telma)',
+                  },
+                  form: {
+                    type: Type.STRING,
+                    description: 'tablet, capsule, syrup, injection, drops, ointment, or other',
+                  },
+                  strength: {
+                    type: Type.STRING,
+                    description: 'Strength with units (e.g., 500mg, 40mg, 10ml) or "Not specified"',
+                  },
+                  frequency_raw: {
+                    type: Type.STRING,
+                    description: 'Shorthand abbreviation as written on prescription (e.g., OD, BD, TDS, 1-0-1, BBF)',
+                  },
+                  frequency_plain: {
+                    type: Type.STRING,
+                    description: 'Expanded plain English instruction (e.g., Once daily, Twice daily, Three times daily, SOS)',
+                  },
+                  food_relation: {
+                    type: Type.STRING,
+                    description: 'One of: before_food, after_food, with_food, empty_stomach, bedtime, not_specified',
+                  },
+                  duration_days: {
+                    type: Type.INTEGER,
+                    description: 'Duration in days (e.g., 3, 5, 7, 14, 30), or 0 if not specified',
+                  },
+                  instructions_hindi: {
+                    type: Type.STRING,
+                    description: 'Plain Hindi spoken instruction in Devanagari script for the patient',
+                  },
+                  special_instructions: {
+                    type: Type.STRING,
+                    description: 'Additional instructions like SOS for fever, dissolve in water, etc.',
+                  },
+                  confidence_name: {
+                    type: Type.NUMBER,
+                    description: 'Confidence in reading the medicine name (0.0 to 1.0)',
+                  },
+                  confidence_dose: {
+                    type: Type.NUMBER,
+                    description: 'Confidence in reading the dosage/form (0.0 to 1.0)',
+                  },
+                  confidence_frequency: {
+                    type: Type.NUMBER,
+                    description: 'Confidence in reading frequency and food timing (0.0 to 1.0)',
+                  },
+                },
+                required: [
+                  'drug_name',
+                  'form',
+                  'strength',
+                  'frequency_raw',
+                  'frequency_plain',
+                  'food_relation',
+                  'instructions_hindi',
+                  'confidence_name',
+                  'confidence_dose',
+                  'confidence_frequency',
+                ],
               },
             },
-            required: [
-              'drug_name',
-              'form',
-              'strength',
-              'frequency_raw',
-              'frequency_plain',
-              'food_relation',
-              'confidence_name',
-              'confidence_dose',
-              'confidence_frequency',
-            ],
           },
+          required: ['is_legible', 'medications', 'extraction_notes'],
         },
       },
     });
 
-    const rawJson = response.text?.trim() || '[]';
-    let parsed = JSON.parse(rawJson);
-    if (!Array.isArray(parsed)) {
-      parsed = [];
+    const rawJson = response.text?.trim() || '{}';
+    // Sanitize any markdown code fences before parsing
+    const sanitized = rawJson
+      .replace(/^```(?:json)?\s*/i, '')
+      .replace(/\s*```$/i, '')
+      .trim();
+
+    let parsedResult: any;
+    try {
+      parsedResult = JSON.parse(sanitized);
+    } catch (parseErr) {
+      console.warn('JSON parsing error, attempting recovery:', parseErr);
+      parsedResult = {};
     }
 
+    const rawMeds: any[] = Array.isArray(parsedResult.medications)
+      ? parsedResult.medications
+      : Array.isArray(parsedResult)
+      ? parsedResult
+      : [];
+
     // Normalize items
-    const medicines = parsed.map((item: any, idx: number) => {
+    const medicines = rawMeds.map((item: any, idx: number) => {
       const formNorm = ['tablet', 'capsule', 'syrup', 'injection', 'drops', 'ointment'].includes(
         item.form?.toLowerCase(),
       )
@@ -202,26 +264,45 @@ Do NOT guess wildly. If an entry is barely legible, reflect that with a low conf
         ? item.food_relation
         : 'not_specified';
 
+      const confName = typeof item.confidence_name === 'number'
+        ? Math.max(0, Math.min(1, item.confidence_name))
+        : typeof item.confidence === 'number'
+        ? Math.max(0, Math.min(1, item.confidence))
+        : 0.85;
+
+      const confDose = typeof item.confidence_dose === 'number'
+        ? Math.max(0, Math.min(1, item.confidence_dose))
+        : confName;
+
+      const confFreq = typeof item.confidence_frequency === 'number'
+        ? Math.max(0, Math.min(1, item.confidence_frequency))
+        : confName;
+
       return {
         id: `med_${Date.now()}_${idx}`,
         drug_name: item.drug_name || 'Unidentified Medicine',
         form: formNorm,
-        strength: item.strength || '',
+        strength: item.strength && item.strength !== 'Not specified' ? item.strength : '',
         frequency_raw: item.frequency_raw || 'OD',
         frequency_plain: item.frequency_plain || 'Once a day',
         food_relation: foodNorm,
         duration_days: item.duration_days && item.duration_days > 0 ? item.duration_days : null,
-        special_instructions: item.special_instructions || null,
+        special_instructions: item.instructions_hindi || item.special_instructions || null,
         confidence: {
-          name: typeof item.confidence_name === 'number' ? Math.max(0, Math.min(1, item.confidence_name)) : 0.85,
-          dose: typeof item.confidence_dose === 'number' ? Math.max(0, Math.min(1, item.confidence_dose)) : 0.85,
-          frequency: typeof item.confidence_frequency === 'number' ? Math.max(0, Math.min(1, item.confidence_frequency)) : 0.85,
+          name: confName,
+          dose: confDose,
+          frequency: confFreq,
         },
         verified: false,
       };
     });
 
-    res.json({ medicines });
+    res.json({
+      medicines,
+      patient_name: parsedResult.patient_name || null,
+      is_legible: parsedResult.is_legible !== false,
+      extraction_notes: parsedResult.extraction_notes || '',
+    });
   } catch (error: any) {
     console.warn('Extraction upstream error, generating structured clinical fallback:', error);
     const { promptHint = '' } = req.body;
